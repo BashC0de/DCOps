@@ -1,0 +1,37 @@
+# Pre-commit hooks. Install with `pre-commit install` (run once per clone).
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-yaml
+      - id: check-toml
+      - id: check-merge-conflict
+      - id: detect-private-key
+      - id: check-added-large-files
+        args: [--maxkb=512]
+
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.7.0
+    hooks:
+      - id: ruff
+        args: [--fix]
+        exclude: ^(apps/dashboard|data|infra/grafana)/
+      - id: ruff-format
+        exclude: ^(apps/dashboard|data|infra/grafana)/
+
+  - repo: https://github.com/pre-commit/mirrors-prettier
+    rev: v3.1.0
+    hooks:
+      - id: prettier
+        types_or: [ts, tsx, javascript, jsx, json, markdown]
+        exclude: ^(infra/grafana|data)/
+
+  - repo: local
+    hooks:
+      - id: no-env-files
+        name: Refuse to commit .env
+        entry: bash -c 'if git diff --cached --name-only | grep -E "(^|/)\.env$"; then echo "Cowardly refusing to commit a .env file."; exit 1; fi'
+        language: system
+        pass_filenames: false

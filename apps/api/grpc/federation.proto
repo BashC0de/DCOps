@@ -1,0 +1,77 @@
+// =============================================================================
+// Site <-> Control plane federation streams.
+// =============================================================================
+// Compile to Python with:
+//   python -m grpc_tools.protoc -I apps/api/grpc \
+//       --python_out=apps/api/grpc/generated \
+//       --grpc_python_out=apps/api/grpc/generated \
+//       apps/api/grpc/federation.proto
+// =============================================================================
+
+syntax = "proto3";
+
+package dcops.federation;
+
+service Federation {
+  // Site -> control plane: continuous heartbeats with summarized health.
+  rpc StreamHeartbeats (stream Heartbeat) returns (HeartbeatAck);
+
+  // Site -> control plane: every IncidentReport, real time.
+  rpc StreamIncidents (stream IncidentReportProto) returns (IncidentAck);
+
+  // Control plane -> site: detection rule propagation.
+  rpc StreamRuleCandidates (RuleSubscribe) returns (stream RuleCandidate);
+
+  // Control plane -> site: policy updates (broadcast within 1s).
+  rpc StreamPolicies (PolicySubscribe) returns (stream PolicyUpdate);
+}
+
+message Heartbeat {
+  string site_id = 1;
+  string ts = 2;                          // ISO-8601 UTC
+  double uptime_seconds = 3;
+  map<string, double> summary_metrics = 4;  // e.g. {"open_incidents": 3, "avg_inlet_c": 22.5}
+  repeated string degraded_agents = 5;
+}
+
+message HeartbeatAck {
+  bool ok = 1;
+}
+
+message IncidentReportProto {
+  string incident_id = 1;
+  string site_id = 2;
+  string opened_at = 3;
+  string severity = 4;
+  repeated string affected_devices = 5;
+  string top_hypotheses_json = 6;
+  double confidence = 7;
+  double llm_cost_usd = 8;
+}
+
+message IncidentAck {
+  bool ok = 1;
+}
+
+message RuleSubscribe {
+  string site_id = 1;
+}
+
+message RuleCandidate {
+  string rule_id = 1;
+  string origin_site_id = 2;
+  string failure_kind = 3;
+  string feature_spec_json = 4;
+  double origin_confidence = 5;
+  string shadow_until = 6;                // ISO-8601 UTC
+}
+
+message PolicySubscribe {
+  string site_id = 1;
+}
+
+message PolicyUpdate {
+  string policy_id = 1;
+  string yaml_payload = 2;
+  string effective_from = 3;
+}

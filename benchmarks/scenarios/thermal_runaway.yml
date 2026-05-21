@@ -1,0 +1,41 @@
+# =============================================================================
+# Scenario: Thermal runaway
+# =============================================================================
+# A rack's GPUs are under sustained heavy workload; one server's fans get stuck.
+# Heat builds, neighbors throttle, downstream workload SLOs slip.
+# Optimizer should propose load migration before Sentinel calls catastrophic
+# failure.
+# =============================================================================
+name: thermal_runaway
+description: |
+  Fan failure on a heavily-loaded GPU server, in a rack with marginal cooling
+  headroom. Tests Sentinel + Optimizer collaboration on pre-failure mitigation.
+
+steps:
+  - delay_seconds: 0
+    device_selector:
+      type: server
+      rack: any
+      filter: { has_gpu: true }
+      pick_strategy: random
+    failure_mode: fan_stuck
+
+  - delay_seconds: 180
+    device_selector:
+      type: gpu
+      parent_of_previous: true
+    failure_mode: gpu_thermal_throttle
+
+expected_detection:
+  agent: sentinel
+  within_seconds: 90
+  failure_kind: thermal_stress
+  min_probability: 0.7
+
+expected_root_cause: |
+  Server cooling failure inducing GPU thermal throttling. Root cause is the
+  stuck fan; the throttle is the symptom.
+
+expected_actions:
+  - workload_migration
+  - fan_replacement_ticket

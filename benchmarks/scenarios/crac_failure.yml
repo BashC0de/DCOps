@@ -1,0 +1,34 @@
+# =============================================================================
+# Scenario: CRAC unit failure
+# =============================================================================
+# A primary CRAC unit fails, causing hall ambient inlet temps to climb.
+# Multiple racks experience secondary thermal stress. This tests cross-device
+# correlation: Forensic should converge on the CRAC as root cause, not the
+# many downstream "hot" GPUs.
+# =============================================================================
+name: crac_failure
+description: |
+  Primary CRAC for hall fails entirely. Hall ambient rises within minutes.
+  Many racks alarm; the correct RCA must collapse them onto the upstream cause.
+
+steps:
+  - delay_seconds: 0
+    device_selector:
+      type: crac
+      hall: any
+      pick_strategy: first
+    failure_mode: crac_fail
+
+expected_detection:
+  agent: sentinel
+  within_seconds: 120
+  failure_kind: thermal_anomaly
+  min_probability: 0.65
+
+expected_root_cause: |
+  CRAC unit failure. Downstream rack thermal alarms are correlated victims,
+  not independent failures. Forensic should converge despite many noisy signals.
+
+expected_actions:
+  - workload_migration_to_other_hall
+  - crac_emergency_dispatch_ticket

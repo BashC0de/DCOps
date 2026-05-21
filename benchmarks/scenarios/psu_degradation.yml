@@ -1,0 +1,33 @@
+# =============================================================================
+# Scenario: PSU efficiency degradation
+# =============================================================================
+# Server PSU efficiency drops gradually, causing increased wall draw and PDU
+# load creep. Sentinel should catch the trend before the PSU outright fails.
+# =============================================================================
+name: psu_degradation
+description: |
+  Slow PSU efficiency drift from ~94% to ~80% over the observation window.
+  No alarms fire from IPMI directly, but PDU load slowly creeps up.
+
+steps:
+  - delay_seconds: 0
+    device_selector:
+      type: server
+      rack: any
+      pick_strategy: random
+    failure_mode: psu_efficiency_drift
+    duration_seconds: 1800
+
+expected_detection:
+  agent: sentinel
+  within_seconds: 300
+  failure_kind: psu_efficiency_drift
+  min_probability: 0.6
+
+expected_root_cause: |
+  Aging PSU: efficiency drift drove additional wall draw and PDU load creep
+  while DC-side draw was unchanged.
+
+expected_actions:
+  - psu_replacement_ticket
+  - workload_migration_if_overcommit

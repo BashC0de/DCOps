@@ -1,0 +1,33 @@
+# =============================================================================
+# Scenario: GPU ECC failure
+# =============================================================================
+# A single GPU starts emitting correctable ECC errors that escalate into
+# uncorrectable. Sentinel should detect within 60s. Forensic should hypothesize
+# memory-cell wear-out. Optimizer should recommend migrating the workload.
+# =============================================================================
+name: gpu_ecc_failure
+description: |
+  Synthetic GPU memory-cell failure. Mimics the classic NVIDIA H100 wear-out
+  signature: ramp in correctable ECC counts followed by an uncorrectable event.
+
+steps:
+  - delay_seconds: 0
+    device_selector:
+      type: gpu
+      rack: any
+      pick_strategy: random
+    failure_mode: gpu_ecc_runaway
+
+expected_detection:
+  agent: sentinel
+  within_seconds: 60
+  failure_kind: gpu_ecc_runaway
+  min_probability: 0.7
+
+expected_root_cause: |
+  GPU memory cell failure: rising correctable ECC counts crossed threshold and
+  produced an uncorrectable error before any external trigger.
+
+expected_actions:
+  - workload_migration
+  - device_quarantine

@@ -1,0 +1,13 @@
+# Grafana auto-provisioned dashboard provider. Ships: Week 1.
+apiVersion: 1
+
+providers:
+  - name: 'dcops'
+    orgId: 1
+    folder: 'DCOps'
+    type: file
+    disableDeletion: false
+    editable: true
+    updateIntervalSeconds: 30
+    options:
+      path: /var/lib/grafana/dashboards

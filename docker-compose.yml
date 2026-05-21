@@ -1,0 +1,681 @@
+# =============================================================================
+# DCOps Copilot — Docker Compose stack
+# =============================================================================
+# Profiles (use one or more):
+#   data    : just the stateful stores (TimescaleDB, Neo4j, ChromaDB, Redis, MinIO)
+#   dev     : data + 1 site (frankfurt) + central control plane + ingestion + API + dashboard
+#   demo    : dev + sites 2 & 3 (singapore, mumbai) — the full federation
+#   site-1, site-2, site-3 : individual site stacks for targeted starts
+#   tools   : Grafana, optional debugging tooling
+#
+# Memory caps are intentional. This stack targets a 16GB laptop; see
+# ARCHITECTURE.md § Memory budget. Edit caps only if you also update that table.
+#
+# Bring up: `make dev`  or  `docker compose --profile dev up -d`
+# Shut down: `make down`
+# =============================================================================
+
+name: dcops
+
+# -----------------------------------------------------------------------------
+# Reusable bits
+# -----------------------------------------------------------------------------
+x-python-base: &python-base
+  build:
+    context: .
+    dockerfile: infra/docker/Dockerfile.python
+  env_file:
+    - .env
+  restart: unless-stopped
+  networks:
+    - dcops
+
+x-agent-defaults: &agent-defaults
+  <<: *python-base
+  deploy:
+    resources:
+      limits:
+        memory: 384M
+
+# -----------------------------------------------------------------------------
+# Services
+# -----------------------------------------------------------------------------
+services:
+
+  # ===========================================================================
+  # DATA LAYER
+  # ===========================================================================
+
+  timescaledb:
+    # Time-series telemetry. Memory cap reflects shared_buffers=256MB +
+    # effective_cache_size=512MB headroom + WAL/connections.
+    # Listed under every profile that has services depending on it.
+    image: timescale/timescaledb:2.17.0-pg16
+    container_name: dcops-timescaledb
+    profiles: [data, dev, demo, site-1, site-2, site-3, tools]
+    environment:
+      POSTGRES_DB: ${TIMESCALE_DB:-dcops}
+      POSTGRES_USER: ${TIMESCALE_USER:-dcops}
+      POSTGRES_PASSWORD: ${TIMESCALE_PASSWORD:-changeme_timescale}
+      # Memory tuning — keep these conservative on a 16GB laptop.
+      TIMESCALEDB_TELEMETRY: off
+    command:
+      - postgres
+      - -c
+      - shared_buffers=256MB
+      - -c
+      - effective_cache_size=512MB
+      - -c
+      - work_mem=8MB
+      - -c
+      - maintenance_work_mem=64MB
+      - -c
+      - max_connections=50
+    ports:
+      - "5432:5432"
+    volumes:
+      - timescale-data:/var/lib/postgresql/data
+      - ./infra/timescale/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${TIMESCALE_USER:-dcops} -d ${TIMESCALE_DB:-dcops}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    deploy:
+      resources:
+        limits:
+          memory: 1024M
+    networks:
+      - dcops
+
+  neo4j:
+    # Knowledge graph. 512M heap + 256M pagecache = 768M cap.
+    image: neo4j:5.24-community
+    container_name: dcops-neo4j
+    profiles: [data, dev, demo, site-1, site-2, site-3]
+    environment:
+      NEO4J_AUTH: ${NEO4J_USER:-neo4j}/${NEO4J_PASSWORD:-changeme_neo4j}
+      NEO4J_server_memory_heap_initial__size: 256m
+      NEO4J_server_memory_heap_max__size: 512m
+      NEO4J_server_memory_pagecache_size: 256m
+      NEO4J_db_tx__log_rotation_retention__policy: "1 days"
+      NEO4J_PLUGINS: '["apoc"]'
+    ports:
+      - "7474:7474"   # HTTP
+      - "7687:7687"   # Bolt
+    volumes:
+      - neo4j-data:/data
+      - neo4j-logs:/logs
+      - ./infra/neo4j/import:/var/lib/neo4j/import:ro
+    healthcheck:
+      test: ["CMD-SHELL", "wget --quiet --tries=1 --spider http://localhost:7474 || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 45s
+    deploy:
+      resources:
+        limits:
+          memory: 768M
+    networks:
+      - dcops
+
+  chromadb:
+    # Vector store for incident embeddings + runbook chunks.
+    # Persistent mode; mmap embeddings keeps RSS modest.
+    image: chromadb/chroma:0.5.15
+    container_name: dcops-chromadb
+    profiles: [data, dev, demo, site-1, site-2, site-3]
+    environment:
+      IS_PERSISTENT: "TRUE"
+      PERSIST_DIRECTORY: /chroma/data
+      ANONYMIZED_TELEMETRY: "FALSE"
+    ports:
+      - "8001:8000"
+    volumes:
+      - chroma-data:/chroma/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fs http://localhost:8000/api/v1/heartbeat || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+    networks:
+      - dcops
+
+  redis:
+    # Event bus + cache. maxmemory enforced, LRU eviction.
+    image: redis:7.4-alpine
+    container_name: dcops-redis
+    profiles: [data, dev, demo, site-1, site-2, site-3]
+    command:
+      - redis-server
+      - --maxmemory
+      - 256mb
+      - --maxmemory-policy
+      - allkeys-lru
+      - --save
+      - ""                # disable RDB snapshots; we don't need persistence for the bus
+      - --appendonly
+      - "no"
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    deploy:
+      resources:
+        limits:
+          memory: 320M     # 256 maxmemory + overhead headroom
+    networks:
+      - dcops
+
+  minio:
+    # Raw log + artifact archive. Single-node, dev-grade.
+    image: minio/minio:RELEASE.2024-09-13T20-26-02Z
+    container_name: dcops-minio
+    profiles: [data, dev, demo, site-1, site-2, site-3]
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ACCESS_KEY:-dcops_minio}
+      MINIO_ROOT_PASSWORD: ${MINIO_SECRET_KEY:-changeme_minio}
+    command: server /data --console-address ":9001"
+    ports:
+      - "9000:9000"   # S3 API
+      - "9001:9001"   # Console
+    volumes:
+      - minio-data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:9000/minio/health/live || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+    networks:
+      - dcops
+
+  # ===========================================================================
+  # SHARED APP SERVICES (single instance regardless of site count)
+  # ===========================================================================
+
+  api:
+    # FastAPI backend serving the dashboard + tooling.
+    <<: *python-base
+    container_name: dcops-api
+    profiles: [dev, demo]
+    command: uvicorn apps.api.main:app --host 0.0.0.0 --port 8080 --reload
+    ports:
+      - "8080:8080"
+    volumes:
+      - .:/workspace:ro          # read-only mount; reload picks up file changes
+    depends_on:
+      timescaledb:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      neo4j:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8080/health || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+
+  control-plane:
+    # Central federation orchestrator (fleet view + cross-site correlator + policy).
+    <<: *python-base
+    container_name: dcops-control-plane
+    profiles: [dev, demo]
+    command: python -m apps.control_plane.main
+    ports:
+      - "50051:50051"            # gRPC
+    volumes:
+      - .:/workspace:ro
+    depends_on:
+      redis:
+        condition: service_healthy
+      neo4j:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+
+  dashboard:
+    # Next.js 14 ops UI.
+    build:
+      context: ./apps/dashboard
+      dockerfile: Dockerfile
+    container_name: dcops-dashboard
+    profiles: [dev, demo]
+    environment:
+      NEXT_PUBLIC_API_BASE_URL: ${NEXT_PUBLIC_API_BASE_URL:-http://localhost:8080}
+      NEXT_PUBLIC_WS_URL: ${NEXT_PUBLIC_WS_URL:-ws://localhost:8080/ws}
+      NODE_ENV: development
+    command: npm run dev
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./apps/dashboard:/app
+      - dashboard-node-modules:/app/node_modules
+    depends_on:
+      api:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+    networks:
+      - dcops
+
+  grafana:
+    # Eat our own dog food — Grafana boards over TimescaleDB metrics.
+    image: grafana/grafana:11.2.2
+    container_name: dcops-grafana
+    profiles: [tools, dev, demo]
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_INSTALL_PLUGINS: ""
+    ports:
+      - "3001:3000"
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./infra/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./infra/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    depends_on:
+      timescaledb:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+    networks:
+      - dcops
+
+  # ===========================================================================
+  # SITE STACK 1 — Frankfurt (default dev site)
+  # ===========================================================================
+  # Each agent is its own container so they can be scaled / restarted independently
+  # and so memory caps are enforced per-agent.
+
+  ingestion-frankfurt:
+    <<: *python-base
+    container_name: dcops-ingestion-frankfurt
+    profiles: [dev, demo, site-1]
+    command: python -m apps.ingestion.main
+    environment:
+      SITE_ID: frankfurt
+    volumes:
+      - .:/workspace:ro
+    depends_on:
+      redis:
+        condition: service_healthy
+      timescaledb:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+
+  simulator-frankfurt:
+    <<: *python-base
+    container_name: dcops-simulator-frankfurt
+    profiles: [dev, demo, site-1]
+    command: python -m apps.simulator.main --site frankfurt
+    environment:
+      SITE_ID: frankfurt
+    volumes:
+      - .:/workspace:ro
+    depends_on:
+      redis:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+
+  sentinel-frankfurt:
+    <<: *agent-defaults
+    container_name: dcops-sentinel-frankfurt
+    profiles: [dev, demo, site-1]
+    command: python -m apps.agents.sentinel.main
+    environment:
+      SITE_ID: frankfurt
+    volumes:
+      - .:/workspace:ro
+    depends_on:
+      redis:
+        condition: service_healthy
+      timescaledb:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          memory: 768M    # Sentinel runs XGBoost in-process
+
+  forensic-frankfurt:
+    <<: *agent-defaults
+    container_name: dcops-forensic-frankfurt
+    profiles: [dev, demo, site-1]
+    command: python -m apps.agents.forensic.main
+    environment:
+      SITE_ID: frankfurt
+    volumes:
+      - .:/workspace:ro
+    depends_on:
+      redis:
+        condition: service_healthy
+      neo4j:
+        condition: service_healthy
+      chromadb:
+        condition: service_healthy
+
+  operator-frankfurt:
+    <<: *agent-defaults
+    container_name: dcops-operator-frankfurt
+    profiles: [dev, demo, site-1]
+    command: python -m apps.agents.operator.main
+    environment:
+      SITE_ID: frankfurt
+    volumes:
+      - .:/workspace:ro
+    depends_on:
+      timescaledb:
+        condition: service_healthy
+      chromadb:
+        condition: service_healthy
+
+  optimizer-frankfurt:
+    <<: *agent-defaults
+    container_name: dcops-optimizer-frankfurt
+    profiles: [dev, demo, site-1]
+    command: python -m apps.agents.optimizer.main
+    environment:
+      SITE_ID: frankfurt
+    volumes:
+      - .:/workspace:ro
+    depends_on:
+      redis:
+        condition: service_healthy
+
+  planner-frankfurt:
+    <<: *agent-defaults
+    container_name: dcops-planner-frankfurt
+    profiles: [dev, demo, site-1]
+    command: python -m apps.agents.planner.main
+    environment:
+      SITE_ID: frankfurt
+    volumes:
+      - .:/workspace:ro
+    depends_on:
+      timescaledb:
+        condition: service_healthy
+
+  vision-frankfurt:
+    <<: *agent-defaults
+    container_name: dcops-vision-frankfurt
+    profiles: [demo, site-1]   # vision is Week 9; not in default dev profile
+    command: python -m apps.agents.vision.main
+    environment:
+      SITE_ID: frankfurt
+    volumes:
+      - .:/workspace:ro
+
+  executor-frankfurt:
+    <<: *agent-defaults
+    container_name: dcops-executor-frankfurt
+    profiles: [dev, demo, site-1]
+    command: python -m apps.agents.executor.main
+    environment:
+      SITE_ID: frankfurt
+    volumes:
+      - .:/workspace:ro
+    depends_on:
+      redis:
+        condition: service_healthy
+
+  rollback-frankfurt:
+    <<: *agent-defaults
+    container_name: dcops-rollback-frankfurt
+    profiles: [dev, demo, site-1]
+    command: python -m apps.agents.rollback.main
+    environment:
+      SITE_ID: frankfurt
+    volumes:
+      - .:/workspace:ro
+    depends_on:
+      redis:
+        condition: service_healthy
+
+  # ===========================================================================
+  # SITE STACK 2 — Singapore (demo profile only)
+  # ===========================================================================
+
+  ingestion-singapore:
+    <<: *python-base
+    container_name: dcops-ingestion-singapore
+    profiles: [demo, site-2]
+    command: python -m apps.ingestion.main
+    environment:
+      SITE_ID: singapore
+    volumes: [".:/workspace:ro"]
+    depends_on:
+      redis:    { condition: service_healthy }
+      timescaledb: { condition: service_healthy }
+    deploy: { resources: { limits: { memory: 256M } } }
+
+  simulator-singapore:
+    <<: *python-base
+    container_name: dcops-simulator-singapore
+    profiles: [demo, site-2]
+    command: python -m apps.simulator.main --site singapore
+    environment:
+      SITE_ID: singapore
+    volumes: [".:/workspace:ro"]
+    depends_on:
+      redis: { condition: service_healthy }
+    deploy: { resources: { limits: { memory: 256M } } }
+
+  sentinel-singapore:
+    <<: *agent-defaults
+    container_name: dcops-sentinel-singapore
+    profiles: [demo, site-2]
+    command: python -m apps.agents.sentinel.main
+    environment:
+      SITE_ID: singapore
+    volumes: [".:/workspace:ro"]
+    depends_on:
+      redis: { condition: service_healthy }
+    deploy: { resources: { limits: { memory: 768M } } }
+
+  forensic-singapore:
+    <<: *agent-defaults
+    container_name: dcops-forensic-singapore
+    profiles: [demo, site-2]
+    command: python -m apps.agents.forensic.main
+    environment:
+      SITE_ID: singapore
+    volumes: [".:/workspace:ro"]
+    depends_on:
+      redis: { condition: service_healthy }
+      neo4j: { condition: service_healthy }
+      chromadb: { condition: service_healthy }
+
+  operator-singapore:
+    <<: *agent-defaults
+    container_name: dcops-operator-singapore
+    profiles: [demo, site-2]
+    command: python -m apps.agents.operator.main
+    environment:
+      SITE_ID: singapore
+    volumes: [".:/workspace:ro"]
+
+  optimizer-singapore:
+    <<: *agent-defaults
+    container_name: dcops-optimizer-singapore
+    profiles: [demo, site-2]
+    command: python -m apps.agents.optimizer.main
+    environment:
+      SITE_ID: singapore
+    volumes: [".:/workspace:ro"]
+
+  planner-singapore:
+    <<: *agent-defaults
+    container_name: dcops-planner-singapore
+    profiles: [demo, site-2]
+    command: python -m apps.agents.planner.main
+    environment:
+      SITE_ID: singapore
+    volumes: [".:/workspace:ro"]
+
+  executor-singapore:
+    <<: *agent-defaults
+    container_name: dcops-executor-singapore
+    profiles: [demo, site-2]
+    command: python -m apps.agents.executor.main
+    environment:
+      SITE_ID: singapore
+    volumes: [".:/workspace:ro"]
+
+  rollback-singapore:
+    <<: *agent-defaults
+    container_name: dcops-rollback-singapore
+    profiles: [demo, site-2]
+    command: python -m apps.agents.rollback.main
+    environment:
+      SITE_ID: singapore
+    volumes: [".:/workspace:ro"]
+
+  # ===========================================================================
+  # SITE STACK 3 — Mumbai (demo profile only)
+  # ===========================================================================
+
+  ingestion-mumbai:
+    <<: *python-base
+    container_name: dcops-ingestion-mumbai
+    profiles: [demo, site-3]
+    command: python -m apps.ingestion.main
+    environment:
+      SITE_ID: mumbai
+    volumes: [".:/workspace:ro"]
+    depends_on:
+      redis: { condition: service_healthy }
+      timescaledb: { condition: service_healthy }
+    deploy: { resources: { limits: { memory: 256M } } }
+
+  simulator-mumbai:
+    <<: *python-base
+    container_name: dcops-simulator-mumbai
+    profiles: [demo, site-3]
+    command: python -m apps.simulator.main --site mumbai
+    environment:
+      SITE_ID: mumbai
+    volumes: [".:/workspace:ro"]
+    depends_on:
+      redis: { condition: service_healthy }
+    deploy: { resources: { limits: { memory: 256M } } }
+
+  sentinel-mumbai:
+    <<: *agent-defaults
+    container_name: dcops-sentinel-mumbai
+    profiles: [demo, site-3]
+    command: python -m apps.agents.sentinel.main
+    environment:
+      SITE_ID: mumbai
+    volumes: [".:/workspace:ro"]
+    depends_on:
+      redis: { condition: service_healthy }
+    deploy: { resources: { limits: { memory: 768M } } }
+
+  forensic-mumbai:
+    <<: *agent-defaults
+    container_name: dcops-forensic-mumbai
+    profiles: [demo, site-3]
+    command: python -m apps.agents.forensic.main
+    environment:
+      SITE_ID: mumbai
+    volumes: [".:/workspace:ro"]
+    depends_on:
+      redis: { condition: service_healthy }
+      neo4j: { condition: service_healthy }
+      chromadb: { condition: service_healthy }
+
+  operator-mumbai:
+    <<: *agent-defaults
+    container_name: dcops-operator-mumbai
+    profiles: [demo, site-3]
+    command: python -m apps.agents.operator.main
+    environment:
+      SITE_ID: mumbai
+    volumes: [".:/workspace:ro"]
+
+  optimizer-mumbai:
+    <<: *agent-defaults
+    container_name: dcops-optimizer-mumbai
+    profiles: [demo, site-3]
+    command: python -m apps.agents.optimizer.main
+    environment:
+      SITE_ID: mumbai
+    volumes: [".:/workspace:ro"]
+
+  planner-mumbai:
+    <<: *agent-defaults
+    container_name: dcops-planner-mumbai
+    profiles: [demo, site-3]
+    command: python -m apps.agents.planner.main
+    environment:
+      SITE_ID: mumbai
+    volumes: [".:/workspace:ro"]
+
+  executor-mumbai:
+    <<: *agent-defaults
+    container_name: dcops-executor-mumbai
+    profiles: [demo, site-3]
+    command: python -m apps.agents.executor.main
+    environment:
+      SITE_ID: mumbai
+    volumes: [".:/workspace:ro"]
+
+  rollback-mumbai:
+    <<: *agent-defaults
+    container_name: dcops-rollback-mumbai
+    profiles: [demo, site-3]
+    command: python -m apps.agents.rollback.main
+    environment:
+      SITE_ID: mumbai
+    volumes: [".:/workspace:ro"]
+
+# -----------------------------------------------------------------------------
+# Volumes
+# -----------------------------------------------------------------------------
+volumes:
+  timescale-data:
+  neo4j-data:
+  neo4j-logs:
+  chroma-data:
+  minio-data:
+  grafana-data:
+  dashboard-node-modules:
+
+# -----------------------------------------------------------------------------
+# Networks
+# -----------------------------------------------------------------------------
+networks:
+  dcops:
+    driver: bridge

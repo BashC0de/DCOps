@@ -1,0 +1,32 @@
+# =============================================================================
+# Scenario: Switch port cascade
+# =============================================================================
+# A ToR switch starts flapping ports. Multiple servers lose connectivity to
+# their primary uplink. Tests Forensic's ability to identify the switch as
+# common cause across many independent server alerts.
+# =============================================================================
+name: switch_cascade
+description: |
+  ToR switch port flapping. Many downstream servers go intermittent. Correct
+  RCA must collapse to the switch, not blame the servers.
+
+steps:
+  - delay_seconds: 0
+    device_selector:
+      type: switch
+      rack: any
+      pick_strategy: random
+    failure_mode: switch_port_flap
+
+expected_detection:
+  agent: sentinel
+  within_seconds: 60
+  failure_kind: network_anomaly
+  min_probability: 0.7
+
+expected_root_cause: |
+  Switch port flap. Downstream server network errors are symptoms.
+
+expected_actions:
+  - switch_port_reset
+  - escalation_ticket_if_persistent

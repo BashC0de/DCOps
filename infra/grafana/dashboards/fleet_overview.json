@@ -1,0 +1,29 @@
+{
+  "_comment": "DCOps fleet overview — Week 1 stub. Real panels filled in Week 10.",
+  "annotations": { "list": [] },
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 0,
+  "id": null,
+  "links": [],
+  "panels": [
+    {
+      "type": "row",
+      "title": "Fleet overview (stub) — populate in Week 10",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 },
+      "collapsed": false,
+      "id": 1
+    }
+  ],
+  "refresh": "30s",
+  "schemaVersion": 39,
+  "tags": ["dcops"],
+  "templating": { "list": [] },
+  "time": { "from": "now-6h", "to": "now" },
+  "timepicker": {},
+  "timezone": "",
+  "title": "DCOps Fleet Overview",
+  "uid": "dcops-fleet-overview",
+  "version": 1,
+  "weekStart": ""
+}

@@ -1,0 +1,32 @@
+# =============================================================================
+# Default policy ruleset for the policy engine.
+# =============================================================================
+# Loaded at control-plane boot. Edit to add/remove rules. Per-site overrides
+# can be added via `applies_to_sites: [frankfurt]` etc.
+#
+# Ships: Week 8 (skeleton evaluator); policies themselves are tunables.
+# =============================================================================
+
+policies:
+  - id: blast-radius-global
+    kind: blast_radius
+    parameters:
+      max_devices_per_action: 8
+    # Empty applies_to_sites = applies to all sites.
+
+  - id: nightly-migration-freeze
+    kind: blackout_window
+    parameters:
+      local_start_hour: 22
+      local_end_hour: 6
+      applies_to_kinds: ["workload_migration"]
+
+  - id: change-freeze-global
+    kind: change_freeze
+    parameters:
+      enabled: false                # flip to true during freeze periods
+
+  - id: vision-decisions-need-human
+    kind: custom
+    parameters:
+      rule: "if recommendation.metadata.source == 'vision' then needs_human"
