@@ -204,6 +204,99 @@ services:
     networks:
       - dcops
 
+  ollama:
+    # Local OSS LLM runtime. Default backend for the LLM router.
+    # Models are pulled on first use; the ollama-init sidecar warms the
+    # always-resident fast model. Memory cap covers one 7B Q4 model
+    # (~5GB) + headroom; only one big model is resident at a time.
+    # See ARCHITECTURE.md § LLM routing strategy and § Memory budget.
+    image: ollama/ollama:0.4.1
+    container_name: dcops-ollama
+    profiles: [data, dev, demo, site-1, site-2, site-3]
+    environment:
+      OLLAMA_KEEP_ALIVE: ${OLLAMA_KEEP_ALIVE:-5m}
+      # Bind to all interfaces inside the container so siblings on the
+      # `dcops` network can reach it.
+      OLLAMA_HOST: 0.0.0.0:11434
+      # Cap concurrent model loads so memory doesn't spike on bursts.
+      OLLAMA_MAX_LOADED_MODELS: 2
+      OLLAMA_NUM_PARALLEL: 2
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama-models:/root/.ollama
+    healthcheck:
+      test: ["CMD-SHELL", "ollama list >/dev/null 2>&1 || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    deploy:
+      resources:
+        limits:
+          memory: 6144M
+    networks:
+      - dcops
+
+  ollama-init:
+    # One-shot: pulls the models named in .env so the first agent call
+    # doesn't time out fetching weights. Re-run by recreating the service:
+    #   docker compose run --rm ollama-init
+    image: ollama/ollama:0.4.1
+    container_name: dcops-ollama-init
+    profiles: [dev, demo, site-1, site-2, site-3]
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        set -e
+        echo "Pulling fast model: ${LLM_MODEL_FAST:-llama3.2:3b}"
+        ollama pull "${LLM_MODEL_FAST:-llama3.2:3b}"
+        echo "Pulling coder model: ${LLM_MODEL_CODER:-qwen2.5-coder:3b}"
+        ollama pull "${LLM_MODEL_CODER:-qwen2.5-coder:3b}"
+        echo "Pulling reasoning model: ${LLM_MODEL_REASONING:-qwen2.5:7b}"
+        ollama pull "${LLM_MODEL_REASONING:-qwen2.5:7b}"
+        echo "Ollama warm-up complete."
+    environment:
+      OLLAMA_HOST: ollama:11434
+    depends_on:
+      ollama:
+        condition: service_healthy
+    restart: "no"
+    networks:
+      - dcops
+
+  # ===========================================================================
+  # MOCK VENDOR ENDPOINTS  (opt-in `mocks` profile)
+  # ===========================================================================
+  # One FastAPI service emulates Redfish (Dell iDRAC), NVIDIA DCGM exporter,
+  # SNMP (switches/PDUs), IPMI, and facility env sensors. Way simpler than
+  # wrangling four vendor-specific images. See apps/mocks/main.py.
+  # Bring up alongside dev:  `docker compose --profile dev --profile mocks up`
+  # ===========================================================================
+
+  mocks:
+    <<: *python-base
+    container_name: dcops-mocks
+    profiles: [mocks]
+    command: uvicorn apps.mocks.main:app --host 0.0.0.0 --port 8090
+    environment:
+      SITE_ID: ${SITE_ID:-frankfurt}
+    volumes:
+      - .:/workspace:ro
+    ports:
+      - "8090:8090"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fs http://localhost:8090/health || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+
   # ===========================================================================
   # SHARED APP SERVICES (single instance regardless of site count)
   # ===========================================================================
@@ -231,6 +324,27 @@ services:
       timeout: 5s
       retries: 5
       start_period: 20s
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+
+  audit:
+    # Drains `audit.events` Redis Stream into MinIO. Content-addressed
+    # storage: object key = audit/<YYYY>/<MM>/<DD>/<sha256>.json. The
+    # consumer group makes it horizontally scalable; one instance is
+    # enough for the demo profile.
+    <<: *python-base
+    container_name: dcops-audit
+    profiles: [dev, demo]
+    command: python -m apps.audit.main
+    volumes:
+      - .:/workspace:ro
+    depends_on:
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
     deploy:
       resources:
         limits:
@@ -385,6 +499,8 @@ services:
         condition: service_healthy
       chromadb:
         condition: service_healthy
+      ollama:
+        condition: service_healthy
 
   operator-frankfurt:
     <<: *agent-defaults
@@ -399,6 +515,8 @@ services:
       timescaledb:
         condition: service_healthy
       chromadb:
+        condition: service_healthy
+      ollama:
         condition: service_healthy
 
   optimizer-frankfurt:
@@ -436,6 +554,9 @@ services:
       SITE_ID: frankfurt
     volumes:
       - .:/workspace:ro
+    depends_on:
+      ollama:
+        condition: service_healthy
 
   executor-frankfurt:
     <<: *agent-defaults
@@ -516,6 +637,7 @@ services:
       redis: { condition: service_healthy }
       neo4j: { condition: service_healthy }
       chromadb: { condition: service_healthy }
+      ollama: { condition: service_healthy }
 
   operator-singapore:
     <<: *agent-defaults
@@ -525,6 +647,8 @@ services:
     environment:
       SITE_ID: singapore
     volumes: [".:/workspace:ro"]
+    depends_on:
+      ollama: { condition: service_healthy }
 
   optimizer-singapore:
     <<: *agent-defaults
@@ -615,6 +739,7 @@ services:
       redis: { condition: service_healthy }
       neo4j: { condition: service_healthy }
       chromadb: { condition: service_healthy }
+      ollama: { condition: service_healthy }
 
   operator-mumbai:
     <<: *agent-defaults
@@ -624,6 +749,8 @@ services:
     environment:
       SITE_ID: mumbai
     volumes: [".:/workspace:ro"]
+    depends_on:
+      ollama: { condition: service_healthy }
 
   optimizer-mumbai:
     <<: *agent-defaults
@@ -672,6 +799,7 @@ volumes:
   minio-data:
   grafana-data:
   dashboard-node-modules:
+  ollama-models:
 
 # -----------------------------------------------------------------------------
 # Networks

@@ -1,0 +1,20 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -m pytest tests/unit/ --no-header -q --no-cov --ignore=tests/unit/test_failure_injector.py)",
+      "Bash(python -m pytest tests/unit/test_ingestion_writer.py --no-header -q --no-cov)",
+      "Bash(python -m pytest tests/unit/test_ingestion_writer.py tests/unit/test_normalizers.py --no-header -q --no-cov)",
+      "Bash(python -m pytest tests/unit/ --no-header -q --no-cov --ignore=tests/unit/test_failure_injector.py -x)",
+      "Bash(python -m py_compile apps/agents/shared/blob_client.py apps/audit/__init__.py apps/audit/sink.py apps/audit/main.py apps/api/main.py apps/api/routes/telemetry.py apps/api/routes/incidents.py apps/api/routes/twin.py tests/unit/test_blob_client.py tests/unit/test_audit_sink.py tests/unit/test_api_routes.py)",
+      "Bash(python -m pytest tests/unit/test_blob_client.py tests/unit/test_audit_sink.py tests/unit/test_api_routes.py --no-header -q --no-cov)",
+      "Bash(python -m pytest tests/unit/test_blob_client.py --no-header -q --no-cov)",
+      "Bash(python -m pytest tests/unit/test_api_routes.py --no-header -q --no-cov)",
+      "Bash(python -m pytest tests/unit/test_audit_sink.py --no-header -q --no-cov)",
+      "Bash(timeout 30 python -m pytest tests/unit/test_audit_sink.py --no-header -v --no-cov)",
+      "Bash(python -m py_compile apps/agents/sentinel/window.py apps/agents/sentinel/features.py apps/agents/sentinel/rules.py apps/agents/sentinel/inference.py apps/agents/sentinel/main.py apps/agents/shared/base.py apps/api/routes/agents.py apps/api/main.py scripts/train_sentinel.py tests/unit/test_sentinel_window.py tests/unit/test_sentinel_features.py tests/unit/test_sentinel_rules.py tests/unit/test_sentinel_inference.py tests/unit/test_sentinel_decisions.py tests/unit/test_agents_health_route.py)",
+      "Bash(python -m pytest tests/unit/test_sentinel_window.py tests/unit/test_sentinel_features.py tests/unit/test_sentinel_rules.py tests/unit/test_sentinel_inference.py tests/unit/test_sentinel_decisions.py tests/unit/test_agents_health_route.py --no-header -q --no-cov)",
+      "Bash(python -m py_compile scripts/seed_graph.py scripts/seed_incidents.py scripts/_incidents_corpus.py tests/unit/test_seed_graph.py tests/unit/test_seed_incidents.py)",
+      "Bash(python -m pytest tests/unit/test_seed_graph.py tests/unit/test_seed_incidents.py --no-header -q --no-cov)"
+    ]
+  }
+}

@@ -1,30 +1,213 @@
 """Cross-site correlator.
 
-Purpose:
-    When site A's Sentinel learns a high-confidence detection rule, the
-    correlator pushes it to sites B and C as a "candidate" rule. Each
-    receiving site enables it in shadow mode for 48h before active use.
+Subscribes to `predictions.failure` from EVERY site (a single Redis pub/sub
+process sees all sites). For each predicted failure kind, tracks
+per-(origin_site, failure_kind) occurrence count + average confidence.
 
-Ships: Week 9 (see ROADMAP.md).
+When a kind crosses the propagation threshold at site A, the correlator
+publishes a `RuleCandidate` to the other sites. The candidate carries
+`shadow_until = now + 48h`; receiving sites enable the pattern in shadow
+mode (logging only) until that timestamp, then promote on operator review.
+
+Counters decay with a sliding window (default 1 hour) so old hits don't
+keep triggering propagation forever.
+
+Resilience: the correlator runs as part of the control-plane process.
+On crash, in-memory counters are lost — the federation re-converges
+naturally because Sentinel keeps firing.
 """
 
 from __future__ import annotations
 
 import asyncio
+import os
+from collections import defaultdict, deque
+from datetime import datetime, timedelta, timezone
+from typing import Any
 
+from apps.agents.shared.event_bus import EventBus
+from apps.agents.shared.events import RuleCandidate
 from apps.agents.shared.logging import get_logger
 
 log = get_logger(__name__)
 
 
-async def run_correlator() -> None:
-    """Long-running cross-site rule propagator. Skeleton until Week 9."""
-    log.info("control_plane.correlator.start", note="skeleton — propagation ships Week 9")
-    while True:
-        # TODO(week-9): subscribe to per-site `rules.discovered` events,
-        #               score candidates, broadcast to other sites with
-        #               shadow_until = now + 48h.
-        await asyncio.sleep(15)
+_PROPAGATION_THRESHOLD = int(os.getenv("CORRELATOR_PROPAGATION_THRESHOLD", "3"))
+_CONFIDENCE_FLOOR = float(os.getenv("CORRELATOR_CONFIDENCE_FLOOR", "0.85"))
+_WINDOW_S = float(os.getenv("CORRELATOR_WINDOW_S", "3600"))
+_SHADOW_HOURS = float(os.getenv("CORRELATOR_SHADOW_HOURS", "48"))
+# Sites known to the federation. In production this comes from a config or
+# a control-plane registry; for the demo the three named sites are baked in.
+_FEDERATION_SITES: tuple[str, ...] = (
+    "frankfurt",
+    "singapore",
+    "mumbai",
+)
+# Per (origin_site, failure_kind, target_site) — don't propagate more often
+# than this. Resets when the bucket purges old entries.
+_REPROPAGATE_COOLDOWN_S = float(os.getenv("CORRELATOR_REPROPAGATE_COOLDOWN_S", "3600"))
 
 
-__all__ = ["run_correlator"]
+def _federation_sites() -> tuple[str, ...]:
+    raw = os.getenv("FEDERATION_SITES")
+    if not raw:
+        return _FEDERATION_SITES
+    return tuple(s.strip() for s in raw.split(",") if s.strip())
+
+
+class CrossSiteCorrelator:
+    """Owns the per-(site, kind) hit log and decides when to propagate."""
+
+    def __init__(self) -> None:
+        # (origin_site, failure_kind) → deque[(ts_seconds, confidence, device_id)]
+        self._hits: dict[tuple[str, str], deque[tuple[float, float, str]]] = defaultdict(deque)
+        # Last propagation timestamp per (origin, kind, target).
+        self._last_propagated: dict[tuple[str, str, str], float] = {}
+
+    def record_prediction(self, event: dict[str, Any]) -> list[tuple[str, str, list[str]]]:
+        """Update counters; return list of (origin_site, kind, sample_devices)
+        ready to propagate. Caller publishes the actual `RuleCandidate`s.
+        """
+        site_id = event.get("site_id")
+        kind = event.get("failure_kind")
+        confidence = event.get("probability")
+        device_id = event.get("device_id", "")
+        if not isinstance(site_id, str) or not isinstance(kind, str):
+            return []
+        if not isinstance(confidence, (int, float)) or float(confidence) < _CONFIDENCE_FLOOR:
+            return []
+
+        now = datetime.now(timezone.utc).timestamp()
+        bucket = self._hits[(site_id, kind)]
+        bucket.append((now, float(confidence), device_id if isinstance(device_id, str) else ""))
+        self._purge_old(bucket, cutoff=now - _WINDOW_S)
+
+        if len(bucket) < _PROPAGATION_THRESHOLD:
+            return []
+
+        # Decide which target sites still need this propagated.
+        ready: list[tuple[str, str, list[str]]] = []
+        for target in _federation_sites():
+            if target == site_id:
+                continue
+            last = self._last_propagated.get((site_id, kind, target), 0.0)
+            if now - last < _REPROPAGATE_COOLDOWN_S:
+                continue
+            self._last_propagated[(site_id, kind, target)] = now
+            sample_devices = sorted({d for _, _, d in bucket if d})[:5]
+            ready.append((site_id, kind, sample_devices))
+            # `ready` is keyed by target; we record per-target via the cooldown
+            # map above. The publisher loops over `_federation_sites()` to know
+            # who to send to.
+        # Re-shape into per-target tuples for the caller — origin/kind/devices
+        # are the same; the publisher fans out.
+        if not ready:
+            return []
+        origin, k, devs = site_id, kind, ready[0][2]
+        # Return one tuple per eligible target so the caller can publish to each.
+        out: list[tuple[str, str, list[str]]] = []
+        for target_origin, _, _ in ready:
+            # All `ready` entries share the same (origin, kind); we keep the
+            # shape (origin, kind, devices) since per-target detail is the
+            # `target` field generated by the publisher.
+            _ = target_origin
+        # Simpler: yield a single tuple — the publisher fans out to all sites
+        # except `site_id`.
+        return [(origin, k, devs)]
+
+    @staticmethod
+    def _purge_old(bucket: deque[tuple[float, float, str]], *, cutoff: float) -> None:
+        while bucket and bucket[0][0] < cutoff:
+            bucket.popleft()
+
+    def hit_count(self, site_id: str, kind: str) -> int:
+        return len(self._hits.get((site_id, kind), ()))
+
+
+def _build_candidate(
+    *,
+    origin_site_id: str,
+    target_site_id: str,
+    failure_kind: str,
+    confidence: float,
+    occurrence_count: int,
+    sample_device_ids: list[str],
+) -> RuleCandidate:
+    return RuleCandidate(
+        site_id=target_site_id,
+        rule_id=f"rule-cs-{origin_site_id}-{failure_kind}",
+        origin_site_id=origin_site_id,
+        target_site_id=target_site_id,
+        failure_kind=failure_kind,
+        origin_confidence=min(1.0, max(0.0, confidence)),
+        shadow_until=datetime.now(timezone.utc) + timedelta(hours=_SHADOW_HOURS),
+        occurrence_count=occurrence_count,
+        sample_device_ids=sample_device_ids,
+    )
+
+
+async def run_correlator(
+    bus: EventBus | None = None,
+    correlator: CrossSiteCorrelator | None = None,
+) -> None:
+    """Long-running cross-site rule propagator."""
+    bus = bus or EventBus.from_env()
+    correlator = correlator or CrossSiteCorrelator()
+    log.info(
+        "control_plane.correlator.start",
+        threshold=_PROPAGATION_THRESHOLD,
+        confidence_floor=_CONFIDENCE_FLOOR,
+        window_s=_WINDOW_S,
+        shadow_hours=_SHADOW_HOURS,
+        federation_sites=_federation_sites(),
+    )
+    try:
+        async for event in bus.subscribe("predictions.failure"):
+            if not isinstance(event, dict):
+                continue
+            ready = correlator.record_prediction(event)
+            if not ready:
+                continue
+            origin, kind, devs = ready[0]
+            count = correlator.hit_count(origin, kind)
+            conf = float(event.get("probability", 0.0))
+            for target in _federation_sites():
+                if target == origin:
+                    continue
+                cand = _build_candidate(
+                    origin_site_id=origin,
+                    target_site_id=target,
+                    failure_kind=kind,
+                    confidence=conf,
+                    occurrence_count=count,
+                    sample_device_ids=devs,
+                )
+                try:
+                    await bus.publish(f"federation.rule_candidate.{target}", cand)
+                except Exception as exc:  # noqa: BLE001
+                    log.warning("correlator.publish_failed", target=target, error=str(exc))
+                # Persist to Redis list for the API to expose.
+                await _persist_candidate(bus, cand)
+                log.info(
+                    "correlator.candidate_propagated",
+                    origin=origin, target=target, failure_kind=kind,
+                    occurrence_count=count,
+                )
+    finally:
+        await bus.close()
+
+
+async def _persist_candidate(bus: EventBus, candidate: RuleCandidate) -> None:
+    """Stash recent candidates per target site in a Redis list."""
+    client = getattr(bus, "_client", None)
+    if client is None:
+        return
+    key = f"federation:candidates:{candidate.target_site_id}"
+    try:
+        await client.lpush(key, candidate.model_dump_json())
+        await client.ltrim(key, 0, 49)  # keep last 50
+    except Exception as exc:  # noqa: BLE001
+        log.warning("correlator.persist_failed", error=str(exc))
+
+
+__all__ = ["CrossSiteCorrelator", "run_correlator"]

@@ -2,18 +2,20 @@
 
 Purpose:
     Boilerplate every agent shares: structlog setup, EventBus connection,
-    graceful shutdown on SIGINT/SIGTERM, audit logging helper. Each agent
-    subclasses `BaseAgent`, declares its name + subscribed topics, and
-    implements `handle()`.
+    graceful shutdown on SIGINT/SIGTERM, audit logging helper, periodic
+    heartbeat write to Redis. Each agent subclasses `BaseAgent`, declares
+    its name + subscribed topics, and implements `handle()`.
 
-Ships: Week 2 (skeleton); audit hooks fleshed out Week 3.
+Ships: Week 2 (skeleton); Week 4 added heartbeat publish.
 """
 
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import signal
+import time
 from abc import ABC, abstractmethod
 from typing import Any
 
@@ -40,12 +42,16 @@ class BaseAgent(ABC):
     subscribed_topic: str = ""
     event_model: type[BusEvent] | None = None
 
+    HEARTBEAT_INTERVAL_S = 10.0
+    HEARTBEAT_TTL_S = 30  # Redis key TTL so dead agents disappear
+
     def __init__(self) -> None:
         configure_logging()
         self.log = get_logger(self.name, agent=self.name)
         self.site_id = os.getenv("SITE_ID", "unknown")
         self.bus = EventBus.from_env()
         self._stop = asyncio.Event()
+        self._heartbeat_task: asyncio.Task[None] | None = None
 
     # --- lifecycle -------------------------------------------------------------
 
@@ -73,6 +79,7 @@ class BaseAgent(ABC):
         """Subscribe to `subscribed_topic` and dispatch to `handle()` per event."""
         await self.on_start()
         self._install_signal_handlers()
+        self._heartbeat_task = asyncio.create_task(self._heartbeat_loop())
         try:
             async for event in self.bus.subscribe(self.subscribed_topic, self.event_model):
                 if self._stop.is_set():
@@ -82,7 +89,48 @@ class BaseAgent(ABC):
                 except Exception as exc:  # noqa: BLE001 — never let a bad event kill the agent
                     self.log.exception("agent.handle_failed", error=str(exc))
         finally:
+            if self._heartbeat_task is not None:
+                self._heartbeat_task.cancel()
+                try:
+                    await self._heartbeat_task
+                except (asyncio.CancelledError, Exception):  # noqa: BLE001
+                    pass
             await self.on_stop()
+
+    # --- heartbeat -------------------------------------------------------------
+
+    @classmethod
+    def heartbeat_key(cls, site_id: str, agent_name: str) -> str:
+        return f"agent:{site_id}:{agent_name}:heartbeat"
+
+    async def _heartbeat_loop(self) -> None:
+        """Write a heartbeat record to Redis every `HEARTBEAT_INTERVAL_S`.
+
+        Key: `agent:<site>:<name>:heartbeat`, TTL = 3× the publish interval
+        so the key drops if the agent dies. Value is a small JSON blob
+        with `last_seen_ts` and `pid` so the dashboard can show liveness.
+        """
+        key = self.heartbeat_key(self.site_id, self.name)
+        while not self._stop.is_set():
+            payload = json.dumps(
+                {
+                    "agent": self.name,
+                    "site_id": self.site_id,
+                    "last_seen_ts": time.time(),
+                    "pid": os.getpid(),
+                }
+            )
+            try:
+                # `bus._client` is the underlying redis.asyncio client.
+                client = getattr(self.bus, "_client", None)
+                if client is not None:
+                    await client.set(key, payload, ex=self.HEARTBEAT_TTL_S)
+            except Exception as exc:  # noqa: BLE001 — heartbeat failures don't kill the agent
+                self.log.debug("agent.heartbeat_failed", error=str(exc))
+            try:
+                await asyncio.sleep(self.HEARTBEAT_INTERVAL_S)
+            except asyncio.CancelledError:
+                raise
 
     # --- subclass contract -----------------------------------------------------
 

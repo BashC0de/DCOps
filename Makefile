@@ -94,9 +94,11 @@ restart: ## Restart all containers in the active profile
 # Seed + reset
 # -----------------------------------------------------------------------------
 .PHONY: seed
-seed: ## Seed Neo4j with 3 sites × 20 racks of devices + initial telemetry samples
+seed: ## Seed Neo4j topology + initial telemetry + Chroma past-incidents + Chroma runbooks
 	$(COMPOSE) --profile dev run --rm api python scripts/seed_graph.py
 	$(COMPOSE) --profile dev run --rm api python scripts/seed_telemetry_sample.py
+	$(COMPOSE) --profile dev run --rm api python scripts/seed_incidents.py
+	$(COMPOSE) --profile dev run --rm api python scripts/seed_runbooks.py
 
 .PHONY: reset-db
 reset-db: ## Reset all databases (DESTRUCTIVE on data)

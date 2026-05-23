@@ -55,7 +55,7 @@ class FailureMode(StrEnum):
 # Devices
 # ---------------------------------------------------------------------------
 
-@dataclass
+@dataclass(kw_only=True)
 class Device:
     """Base device. Subclassed by Server, GPU, Switch, PDU, CRACUnit."""
 
@@ -69,10 +69,11 @@ class Device:
     inlet_temp_c: float = 22.0
     outlet_temp_c: float = 30.0
     power_draw_w: float = 0.0
+    rated_power_w: float = 0.0
     metadata: dict[str, float | str] = field(default_factory=dict)
 
 
-@dataclass
+@dataclass(kw_only=True)
 class Server(Device):
     type: Literal["server"] = "server"
     cpu_util_percent: float = 30.0
@@ -81,10 +82,9 @@ class Server(Device):
     mem_total_bytes: int = 256 * 1024**3
     fan_rpm: int = 5000
     psu_efficiency_percent: float = 94.0
-    rated_power_w: float = 800.0
 
 
-@dataclass
+@dataclass(kw_only=True)
 class GPU(Device):
     type: Literal["gpu"] = "gpu"
     parent_server_id: str = ""
@@ -95,10 +95,9 @@ class GPU(Device):
     ecc_correctable_count: int = 0
     ecc_uncorrectable_count: int = 0
     last_xid_code: int | None = None
-    rated_power_w: float = 700.0
 
 
-@dataclass
+@dataclass(kw_only=True)
 class Switch(Device):
     type: Literal["switch"] = "switch"
     port_count: int = 48
@@ -106,10 +105,9 @@ class Switch(Device):
     bps_in: int = 0
     bps_out: int = 0
     err_in_count: int = 0
-    rated_power_w: float = 250.0
 
 
-@dataclass
+@dataclass(kw_only=True)
 class PDU(Device):
     type: Literal["pdu"] = "pdu"
     load_percent: float = 50.0
@@ -117,7 +115,7 @@ class PDU(Device):
     powered_device_ids: list[str] = field(default_factory=list)
 
 
-@dataclass
+@dataclass(kw_only=True)
 class CRACUnit(Device):
     type: Literal["crac"] = "crac"
     hall_id_serves: str = ""
@@ -125,7 +123,6 @@ class CRACUnit(Device):
     return_temp_c: float = 27.0
     fan_percent: float = 60.0
     capacity_kw: float = 50.0
-    rated_power_w: float = 8_000.0
 
 
 # ---------------------------------------------------------------------------

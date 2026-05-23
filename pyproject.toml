@@ -38,7 +38,10 @@ dependencies = [
     "minio==7.2.9",                     # Raw log archive
 
     # --- LLM / embeddings ---
-    "anthropic==0.39.0",
+    # Default LLM backend is Ollama (local OSS, free) — talks HTTP via the
+    # already-bundled httpx client; no SDK needed. The Anthropic SDK is now
+    # an optional extra; install with `uv sync --extra anthropic` to enable
+    # LLM_BACKEND=anthropic.
     "sentence-transformers==3.2.1",
     "tiktoken==0.8.0",
 
@@ -76,6 +79,11 @@ dependencies = [
 # Heavy ML deps split out so the ingestion/api containers stay small.
 ml = [
     "torch==2.4.1 ; platform_system != 'Darwin' or platform_machine != 'arm64'",
+]
+
+# Paid Claude API backend. Off by default — Ollama is the free path.
+anthropic = [
+    "anthropic==0.39.0",
 ]
 
 # -----------------------------------------------------------------------------

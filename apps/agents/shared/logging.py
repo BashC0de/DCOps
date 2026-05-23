@@ -33,6 +33,20 @@ def _add_site_id(_: Any, __: Any, event_dict: EventDict) -> EventDict:
     return event_dict
 
 
+def _add_logger_name_safe(logger: Any, _: Any, event_dict: EventDict) -> EventDict:
+    """Drop-in for `structlog.stdlib.add_logger_name` that tolerates non-stdlib loggers.
+
+    The bundled processor reads `logger.name`, which exists on stdlib loggers
+    but NOT on `structlog.PrintLogger` (the factory we configure below). Without
+    this wrapper, every log call would `AttributeError` whenever logging is
+    configured — see PR notes / issue tracker.
+    """
+    name = getattr(logger, "name", None)
+    if name and "logger" not in event_dict:
+        event_dict["logger"] = name
+    return event_dict
+
+
 def configure_logging(level: str | None = None, json_output: bool | None = None) -> None:
     """Configure structlog + stdlib logging.
 
@@ -46,7 +60,7 @@ def configure_logging(level: str | None = None, json_output: bool | None = None)
 
     shared_processors: list[Processor] = [
         structlog.contextvars.merge_contextvars,
-        structlog.stdlib.add_logger_name,
+        _add_logger_name_safe,
         structlog.stdlib.add_log_level,
         structlog.processors.TimeStamper(fmt="iso", utc=True),
         _add_site_id,

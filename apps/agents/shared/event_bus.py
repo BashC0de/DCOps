@@ -1,10 +1,12 @@
-"""Redis pub/sub wrapper for inter-agent communication.
+"""Redis pub/sub + streams wrapper for inter-agent communication.
 
 Purpose:
     Typed publish/subscribe over Redis. Producers never need to know about
     Redis serialization; consumers get Pydantic models back.
 
-Ships: Week 2 (see ROADMAP.md).
+Ships: Week 2 (see ROADMAP.md). Redis Streams support (used for
+`audit.events` and durable `actions.*` topics) landed alongside the LLM
+router's audit-log integration.
 
 Topic conventions live in `events.py::Topic`. See ARCHITECTURE.md § Agent
 collaboration for the full topic catalog.
@@ -12,8 +14,8 @@ collaboration for the full topic catalog.
 Notes on durability:
     Most topics use Redis pub/sub (fire-and-forget). Lossy on consumer lag,
     which is acceptable for high-volume telemetry. Critical topics —
-    `actions.*` and `audit.events` — should use Redis Streams instead.
-    Streams support is added in Week 8 when the Executor lands.
+    `actions.*` and `audit.events` — use Redis Streams via
+    `publish_stream()` instead.
 """
 
 from __future__ import annotations
@@ -57,8 +59,8 @@ class EventBus:
 
     # --- producer --------------------------------------------------------------
 
-    async def publish(self, topic: str, event: BusEvent | TelemetryEvent) -> int:
-        """Serialize `event` as JSON and publish to `topic`.
+    async def publish(self, topic: str, event: BusEvent | TelemetryEvent | BaseModel) -> int:
+        """Serialize `event` as JSON and publish to `topic` (pub/sub).
 
         Returns the number of subscribers that received the message.
         """
@@ -66,6 +68,34 @@ class EventBus:
         n = await self._client.publish(topic, payload)
         log.debug("bus.publish", topic=topic, subscribers=n, event_type=type(event).__name__)
         return int(n)
+
+    async def publish_stream(
+        self,
+        stream_key: str,
+        event: BusEvent | TelemetryEvent | BaseModel,
+        maxlen: int | None = 100_000,
+    ) -> str:
+        """Append `event` to a Redis Stream — durable, consumer-group friendly.
+
+        Used for `audit.events`, `actions.*`, and other topics that must
+        survive subscriber lag. `maxlen` caps the stream length with the
+        approximate `~` trim to avoid stalls; pass None for unbounded.
+
+        Returns the stream entry ID (`<ms>-<seq>`).
+        """
+        payload = event.model_dump_json()
+        kwargs: dict[str, Any] = {"fields": {"data": payload}}
+        if maxlen is not None:
+            kwargs["maxlen"] = maxlen
+            kwargs["approximate"] = True
+        entry_id = await self._client.xadd(stream_key, **kwargs)  # type: ignore[arg-type]
+        log.debug(
+            "bus.publish_stream",
+            stream=stream_key,
+            entry_id=entry_id,
+            event_type=type(event).__name__,
+        )
+        return str(entry_id)
 
     # --- consumer --------------------------------------------------------------
 
@@ -108,7 +138,7 @@ class EventBus:
                         )
         finally:
             await pubsub.punsubscribe(pattern)
-            await pubsub.close()
+            await pubsub.aclose()
 
     # --- lifecycle -------------------------------------------------------------
 

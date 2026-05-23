@@ -14,10 +14,6 @@
     "jsx": "preserve",
     "incremental": true,
     "plugins": [{ "name": "next" }],
-    "baseUrl": ".",
-    "paths": {
-      "@/*": ["./*"]
-    },
     "forceConsistentCasingInFileNames": true,
     "noUncheckedIndexedAccess": true
   },

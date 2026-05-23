@@ -132,6 +132,22 @@ class CapacityForecast(BusEvent):
     confidence_intervals: dict[str, list[tuple[float, float]]] = Field(default_factory=dict)
 
 
+# --- LLM router -> audit / alerts -----------------------------------------------
+
+class BudgetExceeded(BusEvent):
+    """Emitted when an agent's daily LLM spend exceeds its cap.
+
+    Router downgrades all subsequent calls to the fast tier until midnight
+    UTC; consumers can surface this on the dashboard.
+    """
+
+    event_type: Literal["budget_exceeded"] = "budget_exceeded"
+    agent: str
+    spent_usd: float
+    budget_usd: float
+    backend: str
+
+
 # --- Operator -> dashboard ------------------------------------------------------
 
 class QueryResult(BusEvent):
@@ -147,6 +163,38 @@ class QueryResult(BusEvent):
     llm_cost_usd: float = 0.0
 
 
+class IncidentVisionAddendum(BusEvent):
+    """Vision agent's structured finding attached to an existing incident."""
+
+    event_type: Literal["incident_vision_addendum"] = "incident_vision_addendum"
+    incident_id: UUID | None = None
+    finding_summary: str
+    affected_device_ids: list[str] = Field(default_factory=list)
+    severity: str
+    confidence: float = Field(..., ge=0.0, le=1.0)
+    evidence_observations: list[str] = Field(default_factory=list)
+
+
+# --- Federation: cross-site rule propagation -----------------------------------
+
+class RuleCandidate(BusEvent):
+    """Cross-site detection rule propagated by the correlator.
+
+    Receiving sites enable it in shadow mode (logging only) until
+    `shadow_until`, then promote to active on rule manager approval.
+    """
+
+    event_type: Literal["rule_candidate"] = "rule_candidate"
+    rule_id: str
+    origin_site_id: str
+    target_site_id: str
+    failure_kind: str
+    origin_confidence: float = Field(..., ge=0.0, le=1.0)
+    shadow_until: datetime
+    occurrence_count: int = 0
+    sample_device_ids: list[str] = Field(default_factory=list)
+
+
 __all__ = [
     "BusEvent",
     "Topic",
@@ -157,4 +205,7 @@ __all__ = [
     "ActionRolledBack",
     "CapacityForecast",
     "QueryResult",
+    "BudgetExceeded",
+    "IncidentVisionAddendum",
+    "RuleCandidate",
 ]
