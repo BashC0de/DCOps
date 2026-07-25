@@ -34,7 +34,10 @@ dependencies = [
     # --- Databases ---
     "psycopg[binary,pool]==3.2.3",     # TimescaleDB
     "neo4j==5.25.0",                    # Knowledge graph
-    "chromadb==0.5.15",                 # Vector store
+    "chromadb==0.5.23",                 # Vector store
+    # Note: `chromadb` transitively pulls `chroma-hnswlib`, which doesn't
+    # ship a Python 3.12 wheel on Windows. Either install MSVC Build Tools
+    # (so `uv sync` compiles the C++ extension) or use Python 3.11.
     "minio==7.2.9",                     # Raw log archive
 
     # --- LLM / embeddings ---
@@ -59,16 +62,23 @@ dependencies = [
     "requests==2.32.3",
 
     # --- gRPC (inter-site federation) ---
+    # NB: protobuf is pinned to 5.26.x because `ortools==9.11.4210` requires
+    # protobuf <5.27. grpcio 1.66.x accepts protobuf >=5.26.1, so 5.26.1 sits
+    # at the intersection. If we ever bump ortools to >=9.12 (newer protobuf
+    # support), raise this too.
     "grpcio==1.66.2",
     "grpcio-tools==1.66.2",
-    "protobuf==5.28.2",
+    "protobuf==5.26.1",
 
     # --- Observability ---
+    # OTEL 1.27 capped protobuf at <5.0; 1.29+ supports protobuf 5.x which is
+    # what ortools 9.11 + grpcio 1.66 require. All three OTEL packages must
+    # pin to the same minor.
     "structlog==24.4.0",
     "rich==13.9.2",
-    "opentelemetry-api==1.27.0",
-    "opentelemetry-sdk==1.27.0",
-    "opentelemetry-exporter-otlp==1.27.0",
+    "opentelemetry-api==1.29.0",
+    "opentelemetry-sdk==1.29.0",
+    "opentelemetry-exporter-otlp==1.29.0",
 
     # --- CLI / scripts ---
     "typer==0.12.5",
