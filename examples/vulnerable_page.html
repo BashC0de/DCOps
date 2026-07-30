@@ -25,6 +25,14 @@
         document.getElementById('result').innerHTML = '<h2>You said: ' + q + '</h2>';
       }
       fetchEcho();
+      
+      // Unsafe DOM manipulation from hash fragment
+      const fragment = window.location.hash.slice(1);
+      if (fragment) {
+        const payload = document.createElement('div');
+        payload.innerHTML = fragment;
+        document.body.appendChild(payload);
+      }
     </script>
   </body>
 </html>

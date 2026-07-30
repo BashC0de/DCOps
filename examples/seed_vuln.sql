@@ -7,3 +7,5 @@ CREATE TABLE users (
 );
 INSERT INTO users (username, password) VALUES ('admin','password123');
 INSERT INTO users (username, password) VALUES ('alice','alicepass');
+INSERT INTO users (username, password) VALUES ('bob','bob123');
+INSERT INTO users (username, password) VALUES ('eve','letmein');

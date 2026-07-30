@@ -3,11 +3,13 @@ INTENTIONAL OWASP vulnerable sample for security scanning and training.
 Do not deploy this in production. Use only for testing SAST/DAST tools.
 """
 
+import base64
 import hashlib
 import os
+import pickle
 import sqlite3
 import subprocess
-from flask import Flask, Response, request
+from flask import Flask, Response, request, redirect
 
 app = Flask(__name__)
 
@@ -68,6 +70,35 @@ def hash_password():
 
     # Weak hashing: MD5 is insecure for password storage
     return {"md5": hashlib.md5(password.encode("utf-8")).hexdigest()}
+
+
+@app.route("/deserialize")
+def deserialize():
+    payload = request.args.get("data", "")
+    # Insecure deserialization: untrusted pickle data can execute arbitrary code
+    try:
+        obj = pickle.loads(base64.b64decode(payload))
+    except Exception as exc:
+        return {"error": str(exc)}, 400
+    return {"object": repr(obj)}
+
+
+@app.route("/redirect")
+def open_redirect():
+    url = request.args.get("url", "")
+    # Open redirect: trust user-controlled URL without validation
+    return redirect(url or "/")
+
+
+@app.route("/eval")
+def unsafe_eval():
+    code = request.args.get("code", "")
+    # Code injection: evaluating untrusted input is dangerous
+    try:
+        result = eval(code)
+    except Exception as exc:
+        return {"error": str(exc)}, 400
+    return {"result": str(result)}
 
 
 if __name__ == "__main__":
